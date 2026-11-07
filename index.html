@@ -18,7 +18,148 @@
     return { birth: mask(m[1]), survive: mask(m[2]) };
   }
 
-  globalThis.LifeEngine = { parseRule };
+  const maskToDigits = (mask) => {
+    let s = '';
+    for (let n = 0; n <= 8; n++) if (mask & (1 << n)) s += n;
+    return s;
+  };
+
+  const TRAIL_DECAY = 16;
+
+  class Life {
+    constructor(width, height, rule = 'B3/S23') {
+      this._alloc(width, height);
+      this.generation = 0;
+      this.population = 0;
+      this.setRule(rule);
+    }
+
+    _alloc(width, height) {
+      this.width = width;
+      this.height = height;
+      const size = width * height;
+      this.cells = new Uint8Array(size);
+      this.next = new Uint8Array(size);
+      this.age = new Uint8Array(size);
+      this.trail = new Uint8Array(size);
+      // Соседние столбцы с оборачиванием (тор) — чтобы не считать % в горячем цикле.
+      this._xm = new Int32Array(width);
+      this._xp = new Int32Array(width);
+      for (let x = 0; x < width; x++) {
+        this._xm[x] = (x - 1 + width) % width;
+        this._xp[x] = (x + 1) % width;
+      }
+    }
+
+    setRule(str) {
+      const { birth, survive } = parseRule(str); // бросает — правило не меняется
+      this.birth = birth;
+      this.survive = survive;
+      this.rule = `B${maskToDigits(birth)}/S${maskToDigits(survive)}`;
+    }
+
+    _index(x, y) {
+      const W = this.width, H = this.height;
+      return (((y % H) + H) % H) * W + (((x % W) + W) % W);
+    }
+
+    get(x, y) {
+      return this.cells[this._index(x, y)];
+    }
+
+    set(x, y, alive) {
+      const i = this._index(x, y);
+      const v = alive ? 1 : 0;
+      if (this.cells[i] !== v) this.population += v ? 1 : -1;
+      this.cells[i] = v;
+      this.age[i] = v;
+      this.trail[i] = 0;
+    }
+
+    step() {
+      const W = this.width, H = this.height;
+      const c = this.cells, n = this.next, age = this.age, trail = this.trail;
+      const xm = this._xm, xp = this._xp;
+      const birth = this.birth, survive = this.survive;
+      let pop = 0;
+      for (let y = 0; y < H; y++) {
+        const rowM = ((y - 1 + H) % H) * W;
+        const row0 = y * W;
+        const rowP = ((y + 1) % H) * W;
+        for (let x = 0; x < W; x++) {
+          const a = xm[x], b = xp[x];
+          const cnt =
+            c[rowM + a] + c[rowM + x] + c[rowM + b] +
+            c[row0 + a] + c[row0 + b] +
+            c[rowP + a] + c[rowP + x] + c[rowP + b];
+          const i = row0 + x;
+          const was = c[i];
+          const now = ((was ? survive : birth) >> cnt) & 1;
+          n[i] = now;
+          if (now) {
+            age[i] = was ? (age[i] < 255 ? age[i] + 1 : 255) : 1;
+            trail[i] = 0;
+            pop++;
+          } else {
+            age[i] = 0;
+            trail[i] = was ? 255 : (trail[i] > TRAIL_DECAY ? trail[i] - TRAIL_DECAY : 0);
+          }
+        }
+      }
+      this.cells = n;
+      this.next = c;
+      this.population = pop;
+      this.generation++;
+    }
+
+    clear() {
+      this.cells.fill(0);
+      this.age.fill(0);
+      this.trail.fill(0);
+      this.population = 0;
+      this.generation = 0;
+    }
+
+    randomize(density, rng = Math.random) {
+      const c = this.cells, age = this.age;
+      let pop = 0;
+      for (let i = 0; i < c.length; i++) {
+        const v = rng() < density ? 1 : 0;
+        c[i] = v;
+        age[i] = v;
+        pop += v;
+      }
+      this.trail.fill(0);
+      this.population = pop;
+      this.generation = 0;
+    }
+
+    // Переносит содержимое в центр нового поля, не влезшее обрезается.
+    resize(newW, newH) {
+      const oW = this.width, oH = this.height;
+      const oc = this.cells, oa = this.age, ot = this.trail;
+      this._alloc(newW, newH);
+      const dx = Math.floor((newW - oW) / 2);
+      const dy = Math.floor((newH - oH) / 2);
+      let pop = 0;
+      for (let y = 0; y < oH; y++) {
+        const ny = y + dy;
+        if (ny < 0 || ny >= newH) continue;
+        for (let x = 0; x < oW; x++) {
+          const nx = x + dx;
+          if (nx < 0 || nx >= newW) continue;
+          const oi = y * oW + x, ni = ny * newW + nx;
+          this.cells[ni] = oc[oi];
+          this.age[ni] = oa[oi];
+          this.trail[ni] = ot[oi];
+          pop += oc[oi];
+        }
+      }
+      this.population = pop;
+    }
+  }
+
+  globalThis.LifeEngine = { parseRule, Life, TRAIL_DECAY };
 })();
 </script>
 <script id="view-math">
