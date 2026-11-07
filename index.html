@@ -9,10 +9,79 @@
   html, body { margin: 0; height: 100%; overflow: hidden; background: #05060a; color: #e6e9f2;
     font: 13px/1.35 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
   #view { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; touch-action: none; cursor: crosshair; }
+
+  #panel { position: fixed; top: 12px; left: 12px; width: 268px; max-height: calc(100vh - 24px); overflow: auto;
+    padding: 10px; border-radius: 12px; background: rgba(15, 18, 30, 0.8); backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px); border: 1px solid rgba(255,255,255,0.08); box-shadow: 0 8px 30px rgba(0,0,0,0.4); }
+  #panel.collapsed { width: auto; padding: 6px; }
+  #panel.collapsed .body { display: none; }
+  #panel .head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  #panel h1 { margin: 0; font-size: 14px; font-weight: 600; letter-spacing: .02em; }
+  #panel.collapsed h1 { display: none; }
+  #panel .body { display: grid; gap: 9px; margin-top: 9px; }
+  .row { display: flex; gap: 6px; align-items: center; }
+  .row > button { flex: 1; }
+  button, select, input[type=text] { font: inherit; color: inherit; background: rgba(255,255,255,0.07);
+    border: 1px solid rgba(255,255,255,0.12); border-radius: 8px; padding: 6px 9px; }
+  button { cursor: pointer; white-space: nowrap; }
+  button:hover, select:hover { background: rgba(255,255,255,0.13); }
+  button.primary { background: #2ee6c8; color: #06121a; border-color: transparent; font-weight: 600; }
+  button.primary:hover { background: #5cf0d8; }
+  select option { background: #141826; }
+  label { display: grid; gap: 4px; color: rgba(230,233,242,0.75); font-size: 12px; }
+  label .val { color: #e6e9f2; }
+  label.check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: inherit; cursor: pointer; }
+  input[type=range] { width: 100%; accent-color: #2ee6c8; }
+  #rule { width: 100%; font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; text-transform: uppercase; }
+  #rule.invalid { border-color: #ff5470; box-shadow: 0 0 0 2px rgba(255,84,112,0.25); }
+  .hint { font-size: 11px; color: rgba(230,233,242,0.5); line-height: 1.5; }
+  #status { position: fixed; left: 12px; bottom: 10px; font-size: 12px; color: rgba(255,255,255,0.6);
+    font-variant-numeric: tabular-nums; pointer-events: none; text-shadow: 0 1px 2px #000; }
 </style>
 </head>
 <body>
 <canvas id="view"></canvas>
+<div id="panel">
+  <div class="head">
+    <h1>Игра «Жизнь»</h1>
+    <button id="collapse" title="Свернуть / развернуть панель">☰</button>
+  </div>
+  <div class="body">
+    <div class="row">
+      <button id="play" class="primary">▶ Старт</button>
+      <button id="step" title="N">Шаг</button>
+      <button id="clear" title="C">Очистить</button>
+    </div>
+    <div class="row"><button id="random" title="R">Случайно</button></div>
+    <label>Плотность: <span class="val" id="densityVal">25 %</span>
+      <input id="density" type="range" min="5" max="60" value="25"></label>
+    <label>Скорость: <span class="val" id="speedVal">15 пок./с</span>
+      <input id="speed" type="range" min="1" max="60" value="15"></label>
+    <label>Правило
+      <select id="preset">
+        <option value="B3/S23">Conway — B3/S23</option>
+        <option value="B36/S23">HighLife — B36/S23</option>
+        <option value="B2/S">Seeds — B2/S</option>
+        <option value="B3678/S34678">Day &amp; Night — B3678/S34678</option>
+        <option value="custom">Своё…</option>
+      </select>
+    </label>
+    <input id="rule" type="text" value="B3/S23" spellcheck="false" autocomplete="off" aria-label="Правило в формате B…/S…">
+    <label>Размер поля
+      <select id="size">
+        <option value="200x150">200 × 150</option>
+        <option value="400x300" selected>400 × 300</option>
+        <option value="600x400">600 × 400</option>
+        <option value="1000x1000">1000 × 1000</option>
+      </select>
+    </label>
+    <label class="check"><input id="trails" type="checkbox" checked> Следы</label>
+    <button id="fit" title="F">Вписать в экран</button>
+    <div class="hint">ЛКМ — рисовать/стирать · ПКМ или пробел+ЛКМ — двигать · колесо — масштаб<br>
+      Пробел — старт/пауза · N — шаг · C — очистить · R — случайно · F — вписать</div>
+  </div>
+</div>
+<div id="status"></div>
 <script id="life-engine">
 (() => {
   'use strict';
@@ -434,7 +503,7 @@
   }, { passive: false });
 
   // Пробел держим для панорамы ЛКМ (переключение старт/пауза — в UI).
-  const typing = (e) => e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement;
+  const typing = (e) => e.target instanceof HTMLInputElement && e.target.type === 'text';
   addEventListener('keydown', (e) => {
     if (e.code !== 'Space' || typing(e)) return;
     e.preventDefault();
@@ -445,6 +514,7 @@
   });
   addEventListener('keyup', (e) => {
     if (e.code !== 'Space' || typing(e)) return;
+    e.preventDefault(); // иначе сфокусированная кнопка/чекбокс тоже «нажмётся»
     app.onSpaceUp?.(!app.dragPannedDuringSpace);
     app.spaceHeld = false;
     canvas.style.cursor = '';
@@ -452,6 +522,89 @@
 
   addEventListener('resize', resizeCanvas);
   Object.assign(app, { render, fit, resizeCanvas });
+
+  // ---------- UI ----------
+  const $ = (id) => document.getElementById(id);
+  const ui = {
+    panel: $('panel'), collapse: $('collapse'), play: $('play'), step: $('step'), clear: $('clear'),
+    random: $('random'), density: $('density'), densityVal: $('densityVal'), speed: $('speed'),
+    speedVal: $('speedVal'), preset: $('preset'), rule: $('rule'), size: $('size'), trails: $('trails'),
+    fit: $('fit'), status: $('status'),
+  };
+
+  function setRunning(on) {
+    app.running = on;
+    ui.play.textContent = on ? '⏸ Пауза' : '▶ Старт';
+  }
+  const actions = {
+    toggle: () => setRunning(!app.running),
+    step: () => { if (!app.running) app.life.step(); },
+    clear: () => app.life.clear(),
+    random: () => app.life.randomize(app.density),
+    fit: () => fit(),
+  };
+
+  ui.play.addEventListener('click', actions.toggle);
+  ui.step.addEventListener('click', actions.step);
+  ui.clear.addEventListener('click', actions.clear);
+  ui.random.addEventListener('click', actions.random);
+  ui.fit.addEventListener('click', actions.fit);
+  ui.collapse.addEventListener('click', () => ui.panel.classList.toggle('collapsed'));
+
+  ui.density.addEventListener('input', () => {
+    app.density = ui.density.value / 100;
+    ui.densityVal.textContent = `${ui.density.value} %`;
+  });
+  ui.speed.addEventListener('input', () => {
+    app.speed = +ui.speed.value;
+    ui.speedVal.textContent = `${ui.speed.value} пок./с`;
+  });
+  ui.trails.addEventListener('change', () => { app.trails = ui.trails.checked; });
+
+  function applyRule(str) {
+    try {
+      app.life.setRule(str);
+      ui.rule.classList.remove('invalid');
+      const match = [...ui.preset.options].find((o) => o.value === app.life.rule);
+      ui.preset.value = match ? match.value : 'custom';
+    } catch {
+      ui.rule.classList.add('invalid'); // действует прежнее правило
+    }
+  }
+  ui.rule.addEventListener('input', () => applyRule(ui.rule.value));
+  ui.rule.addEventListener('change', () => { if (!ui.rule.classList.contains('invalid')) ui.rule.value = app.life.rule; });
+  ui.preset.addEventListener('change', () => {
+    if (ui.preset.value === 'custom') { ui.rule.focus(); ui.rule.select(); return; }
+    ui.rule.value = ui.preset.value;
+    applyRule(ui.preset.value);
+  });
+
+  ui.size.addEventListener('change', () => {
+    const [w, h] = ui.size.value.split('x').map(Number);
+    app.life.resize(w, h);
+    fit();
+  });
+
+  // После клика/выбора убираем фокус с контролов, чтобы пробел и буквы шли в игру.
+  for (const el of ui.panel.querySelectorAll('button, select, input[type=range], input[type=checkbox]')) {
+    el.addEventListener(el.tagName === 'BUTTON' ? 'click' : 'change', () => el.blur());
+  }
+
+  // Горячие клавиши (кроме пробела — он в Input).
+  app.onSpaceUp = (shouldToggle) => { if (shouldToggle) actions.toggle(); };
+  const HOTKEYS = { KeyN: 'step', KeyC: 'clear', KeyR: 'random', KeyF: 'fit' };
+  addEventListener('keydown', (e) => {
+    if (typing(e) || e.ctrlKey || e.metaKey || e.altKey) return;
+    const a = HOTKEYS[e.code];
+    if (a) { e.preventDefault(); actions[a](); }
+  });
+
+  let lastStatus = '';
+  app.onFrame = () => {
+    const L = app.life;
+    const s = `Поколение: ${L.generation.toLocaleString('ru')} · Популяция: ${L.population.toLocaleString('ru')} · ${L.rule}`;
+    if (s !== lastStatus) { ui.status.textContent = s; lastStatus = s; }
+  };
 
   // ---------- Старт ----------
   resizeCanvas();
