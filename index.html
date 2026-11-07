@@ -8,7 +8,8 @@
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; overflow: hidden; background: #05060a; color: #e6e9f2;
     font: 13px/1.35 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
-  #view { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; touch-action: none; cursor: crosshair; }
+  /* 100% фиксированного элемента = видимая область (не «большой» 100vh мобильных браузеров). */
+  #view { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: crosshair; }
 
   #panel { position: fixed; top: 12px; left: 12px; width: 268px; max-height: calc(100vh - 24px); overflow: auto;
     padding: 10px; border-radius: 12px; background: rgba(15, 18, 30, 0.8); backdrop-filter: blur(6px);
@@ -292,7 +293,46 @@
     return { steps, acc: Math.max(0, a - steps / speed) };
   }
 
-  globalThis.ViewMath = { MIN_ZOOM, MAX_ZOOM, screenToCell, cellToScreen, zoomAt, fitCamera, lineCells, stepsForFrame };
+  // Множитель зума для события колеса: щелчок мыши (100 px) = 1.15, мелкие дельты трекпада — пропорционально.
+  const WHEEL_BASE = 1.15, LINE_PX = 33;
+  function wheelFactor(deltaY, deltaMode, pageHeight) {
+    const px = deltaMode === 1 ? deltaY * LINE_PX : deltaMode === 2 ? deltaY * pageHeight : deltaY;
+    return WHEEL_BASE ** (-px / 100);
+  }
+
+  // Клетка под точкой экрана без проверки границ поля.
+  function rawCell(cam, sx, sy, vw, vh) {
+    return { x: Math.floor(cam.x + (sx - vw / 2) / cam.zoom), y: Math.floor(cam.y + (sy - vh / 2) / cam.zoom) };
+  }
+
+  // Клетки отрезка мазка, попавшие в поле W×H (отрезок может начинаться/заканчиваться вне поля).
+  function strokeSegment(from, to, W, H) {
+    return lineCells(from.x, from.y, to.x, to.y).filter(([x, y]) => x >= 0 && y >= 0 && x < W && y < H);
+  }
+
+  // Мазок: режим (рисовать/стирать) задаёт первая клетка; запоминает прежние значения для отката.
+  class Stroke {
+    constructor() { this.mode = null; this.changed = new Map(); }
+    paint(life, cells) {
+      for (const [x, y] of cells) {
+        const prev = life.get(x, y);
+        if (this.mode === null) this.mode = !prev;
+        const key = `${x},${y}`;
+        if (!this.changed.has(key)) this.changed.set(key, [x, y, prev]);
+        life.set(x, y, this.mode);
+      }
+    }
+    revert(life) {
+      for (const [x, y, prev] of this.changed.values()) life.set(x, y, !!prev);
+      this.changed.clear();
+    }
+  }
+
+  // При уменьшении (меньше физического пикселя на клетку) без сглаживания пропадают целые ряды клеток.
+  const smoothFor = (zoom, dpr) => zoom * dpr < 1;
+
+  globalThis.ViewMath = { MIN_ZOOM, MAX_ZOOM, screenToCell, cellToScreen, zoomAt, fitCamera, lineCells, stepsForFrame,
+    wheelFactor, rawCell, strokeSegment, Stroke, smoothFor };
 })();
 </script>
 <script id="app">
@@ -361,7 +401,8 @@
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.fillStyle = OUTSIDE_BG;
     ctx.fillRect(0, 0, vw, vh);
-    ctx.imageSmoothingEnabled = false;
+    ctx.imageSmoothingEnabled = VM.smoothFor(cam.zoom, dpr);
+    ctx.imageSmoothingQuality = 'high';
     const p = VM.cellToScreen(cam, 0, 0, vw, vh);
     ctx.drawImage(off, p.x, p.y, W * cam.zoom, H * cam.zoom);
 
@@ -389,7 +430,9 @@
 
   function resizeCanvas() {
     const dpr = devicePixelRatio || 1;
-    app.vw = innerWidth; app.vh = innerHeight;
+    // Берём реальный размер холста: на телефонах 100vh и innerHeight расходятся из-за адресной строки.
+    const r = canvas.getBoundingClientRect();
+    app.vw = r.width; app.vh = r.height;
     canvas.width = Math.round(app.vw * dpr);
     canvas.height = Math.round(app.vh * dpr);
     // Камера хранит центр, поэтому при смене размера окна центр сохраняется сам.
@@ -417,9 +460,9 @@
   }
 
   // ---------- Input ----------
-  const WHEEL_FACTOR = 1.15;
   const pointers = new Map(); // pointerId -> {x, y}
-  let stroke = null;          // { mode: boolean|null, last: {x,y}|null } — рисование
+  let stroke = null;          // VM.Stroke текущего мазка
+  let lastCell = null;        // последняя клетка мазка (может быть вне поля)
   let pan = null;             // {x, y} — последняя точка панорамы
   let pinch = null;           // { dist, cx, cy } — два пальца
   app.spaceHeld = false;
@@ -429,15 +472,11 @@
     const r = canvas.getBoundingClientRect();
     return { x: e.clientX - r.left, y: e.clientY - r.top };
   };
-  const cellAt = (p) => VM.screenToCell(app.cam, p.x, p.y, app.vw, app.vh, app.life.width, app.life.height);
-
-  // Красит отрезок от прошлой клетки мазка до текущей; вне поля — разрыв мазка.
-  function strokeTo(cell) {
-    if (!cell) { stroke.last = null; return; }
-    if (stroke.mode === null) stroke.mode = !app.life.get(cell.x, cell.y);
-    const from = stroke.last ?? cell;
-    for (const [x, y] of VM.lineCells(from.x, from.y, cell.x, cell.y)) app.life.set(x, y, stroke.mode);
-    stroke.last = cell;
+  // Красит отрезок от прошлой клетки мазка до текущей; клетки вне поля пропускаются, но отрезок не рвётся.
+  function strokeTo(p) {
+    const cell = VM.rawCell(app.cam, p.x, p.y, app.vw, app.vh);
+    stroke.paint(app.life, VM.strokeSegment(lastCell ?? cell, cell, app.life.width, app.life.height));
+    lastCell = cell;
   }
 
   function pinchState() {
@@ -454,7 +493,8 @@
     canvas.setPointerCapture(e.pointerId);
     const p = posOf(e);
     pointers.set(e.pointerId, p);
-    if (pointers.size === 2) {           // второй палец: мазок/панораму прекращаем, начинаем щипок
+    if (pointers.size === 2) {           // второй палец: мазок первого откатываем, начинаем щипок
+      stroke?.revert(app.life);
       stroke = null; pan = null;
       pinch = pinchState();
       return;
@@ -464,8 +504,9 @@
       pan = p;
       if (app.spaceHeld) app.dragPannedDuringSpace = true;
     } else if (e.button === 0) {
-      stroke = { mode: null, last: null };
-      strokeTo(cellAt(p));
+      stroke = new VM.Stroke();
+      lastCell = null;
+      strokeTo(p);
     }
   });
 
@@ -482,7 +523,7 @@
       panBy(p.x - pan.x, p.y - pan.y);
       pan = p;
     } else if (stroke) {
-      strokeTo(cellAt(p));
+      strokeTo(p);
     }
   });
 
@@ -499,7 +540,7 @@
     e.preventDefault();
     if (!e.deltaY) return;
     const p = posOf(e);
-    app.cam = VM.zoomAt(app.cam, p.x, p.y, e.deltaY < 0 ? WHEEL_FACTOR : 1 / WHEEL_FACTOR, app.vw, app.vh);
+    app.cam = VM.zoomAt(app.cam, p.x, p.y, VM.wheelFactor(e.deltaY, e.deltaMode, app.vh), app.vw, app.vh);
   }, { passive: false });
 
   // Пробел держим для панорамы ЛКМ (переключение старт/пауза — в UI).
@@ -512,13 +553,18 @@
     app.dragPannedDuringSpace = false;
     canvas.style.cursor = 'grab';
   });
-  addEventListener('keyup', (e) => {
-    if (e.code !== 'Space' || typing(e)) return;
-    e.preventDefault(); // иначе сфокусированная кнопка/чекбокс тоже «нажмётся»
-    app.onSpaceUp?.(!app.dragPannedDuringSpace);
+  function releaseSpace() {
     app.spaceHeld = false;
     canvas.style.cursor = '';
+  }
+  addEventListener('keyup', (e) => {
+    if (e.code !== 'Space') return;
+    if (typing(e)) { releaseSpace(); return; }
+    e.preventDefault(); // иначе сфокусированная кнопка/чекбокс тоже «нажмётся»
+    if (app.spaceHeld) app.onSpaceUp?.(!app.dragPannedDuringSpace);
+    releaseSpace();
   });
+  addEventListener('blur', releaseSpace); // keyup мог уйти в другое окно (Alt-Tab с зажатым пробелом)
 
   addEventListener('resize', resizeCanvas);
   Object.assign(app, { render, fit, resizeCanvas });
@@ -565,14 +611,22 @@
     try {
       app.life.setRule(str);
       ui.rule.classList.remove('invalid');
+      ui.rule.value = app.life.rule;
       const match = [...ui.preset.options].find((o) => o.value === app.life.rule);
       ui.preset.value = match ? match.value : 'custom';
     } catch {
       ui.rule.classList.add('invalid'); // действует прежнее правило
     }
   }
-  ui.rule.addEventListener('input', () => applyRule(ui.rule.value));
-  ui.rule.addEventListener('change', () => { if (!ui.rule.classList.contains('invalid')) ui.rule.value = app.life.rule; });
+  // Пока печатаешь — только проверка (красная рамка); применяем по Enter или уходу из поля,
+  // чтобы промежуточные правила вроде «B36/S» не губили поле на ходу.
+  ui.rule.addEventListener('input', () => {
+    let ok = true;
+    try { LifeEngine.parseRule(ui.rule.value); } catch { ok = false; }
+    ui.rule.classList.toggle('invalid', !ok);
+  });
+  ui.rule.addEventListener('change', () => applyRule(ui.rule.value));
+  ui.rule.addEventListener('keydown', (e) => { if (e.key === 'Enter') ui.rule.blur(); });
   ui.preset.addEventListener('change', () => {
     if (ui.preset.value === 'custom') { ui.rule.focus(); ui.rule.select(); return; }
     ui.rule.value = ui.preset.value;
@@ -598,6 +652,9 @@
     const a = HOTKEYS[e.code];
     if (a) { e.preventDefault(); actions[a](); }
   });
+
+  // На узком экране панель при старте свёрнута — иначе закрывает большую часть поля.
+  if (innerWidth < 600) ui.panel.classList.add('collapsed');
 
   let lastStatus = '';
   app.onFrame = () => {

@@ -78,3 +78,52 @@ test('stepsForFrame: normal, capped at 8, accumulator capped at 0.25 s', () => {
   assert.equal(c.steps, 0);
   assert.equal(c.acc, 0.25);
 });
+
+// ---------- Final-review fixes ----------
+test('wheelFactor: one notch = 1.15, many small trackpad deltas ≈ one notch', () => {
+  near(VM.wheelFactor(-100, 0, 800), 1.15);
+  near(VM.wheelFactor(100, 0, 800), 1 / 1.15);
+  let z = 2;
+  for (let i = 0; i < 30; i++) z *= VM.wheelFactor(-4, 0, 800);
+  assert.ok(z < 2 * 1.25, `30×(-4px) zoomed to ${z}`);
+  near(VM.wheelFactor(-3, 1, 800), 1.15 ** (99 / 100)); // строки ×33 px
+  near(VM.wheelFactor(1, 2, 800), 1.15 ** (-8));        // страница = высота вьюпорта
+});
+
+test('rawCell is unbounded; strokeSegment keeps only in-field cells, gap-free to the edge', () => {
+  assert.deepEqual(plain(VM.rawCell({ x: 5, y: 5, zoom: 10 }, 0, 0, 800, 600)), { x: -35, y: -25 });
+  const seg = Array.from(VM.strokeSegment({ x: 380, y: 5 }, { x: 420, y: 5 }, 400, 300), (p) => [...p]);
+  assert.equal(seg.length, 20);
+  assert.deepEqual(seg[0], [380, 5]);
+  assert.deepEqual(seg[19], [399, 5]);
+  assert.equal(VM.strokeSegment({ x: -10, y: 5 }, { x: 410, y: 5 }, 400, 300).length, 400);
+  assert.equal(VM.strokeSegment({ x: -10, y: -10 }, { x: -1, y: -1 }, 400, 300).length, 0);
+});
+
+test('Stroke: mode from first in-field cell, revert restores prior cells', () => {
+  const s = new Set(['1,1', '2,1']);
+  const life = {
+    get: (x, y) => (s.has(`${x},${y}`) ? 1 : 0),
+    set: (x, y, v) => (v ? s.add(`${x},${y}`) : s.delete(`${x},${y}`)),
+  };
+  const st = new VM.Stroke();
+  st.paint(life, [[1, 1], [2, 1], [3, 1]]);
+  assert.equal(st.mode, false, 'started on a live cell → erase');
+  assert.equal(s.size, 0);
+  st.paint(life, [[2, 1]]);
+  st.revert(life);
+  assert.deepEqual([...s].sort(), ['1,1', '2,1']);
+
+  const st2 = new VM.Stroke();
+  st2.paint(life, [[5, 5], [1, 1]]);
+  assert.equal(st2.mode, true, 'started on an empty cell → draw');
+  st2.revert(life);
+  assert.deepEqual([...s].sort(), ['1,1', '2,1']);
+});
+
+test('smoothFor: smoothing only when downscaling', () => {
+  assert.equal(VM.smoothFor(0.73, 1), true);
+  assert.equal(VM.smoothFor(0.73, 2), false);
+  assert.equal(VM.smoothFor(1, 1), false);
+  assert.equal(VM.smoothFor(16, 1), false);
+});
