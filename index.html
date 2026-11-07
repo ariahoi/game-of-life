@@ -163,6 +163,61 @@
 })();
 </script>
 <script id="view-math">
+(() => {
+  'use strict';
+  // Камера: { x, y } — координата клетки в центре экрана (дробная), zoom — экранных px на клетку.
+  const MIN_ZOOM = 0.5, MAX_ZOOM = 64;
+  const MAX_ACC = 0.25, MAX_STEPS = 8;
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+
+  function screenToCell(cam, sx, sy, vw, vh, W, H) {
+    const x = Math.floor(cam.x + (sx - vw / 2) / cam.zoom);
+    const y = Math.floor(cam.y + (sy - vh / 2) / cam.zoom);
+    if (x < 0 || y < 0 || x >= W || y >= H) return null;
+    return { x, y };
+  }
+
+  function cellToScreen(cam, cx, cy, vw, vh) {
+    return { x: (cx - cam.x) * cam.zoom + vw / 2, y: (cy - cam.y) * cam.zoom + vh / 2 };
+  }
+
+  function zoomAt(cam, sx, sy, factor, vw, vh) {
+    const ox = sx - vw / 2, oy = sy - vh / 2;
+    const wx = cam.x + ox / cam.zoom, wy = cam.y + oy / cam.zoom;
+    const zoom = clamp(cam.zoom * factor, MIN_ZOOM, MAX_ZOOM);
+    return { x: wx - ox / zoom, y: wy - oy / zoom, zoom };
+  }
+
+  function fitCamera(W, H, vw, vh) {
+    return { x: W / 2, y: H / 2, zoom: clamp(Math.min(vw / W, vh / H) * 0.95, MIN_ZOOM, MAX_ZOOM) };
+  }
+
+  // Брезенхем: все клетки отрезка, включая оба конца.
+  function lineCells(x0, y0, x1, y1) {
+    const out = [];
+    const dx = Math.abs(x1 - x0), dy = -Math.abs(y1 - y0);
+    const sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
+    let err = dx + dy;
+    for (;;) {
+      out.push([x0, y0]);
+      if (x0 === x1 && y0 === y1) break;
+      const e2 = 2 * err;
+      if (e2 >= dy) { err += dy; x0 += sx; }
+      if (e2 <= dx) { err += dx; y0 += sy; }
+    }
+    return out;
+  }
+
+  // Сколько поколений посчитать в этом кадре при скорости speed пок./с.
+  function stepsForFrame(acc, dt, speed) {
+    const a = Math.min(acc + dt, MAX_ACC);
+    const steps = Math.floor(a * speed + 1e-9);
+    if (steps > MAX_STEPS) return { steps: MAX_STEPS, acc: 0 };
+    return { steps, acc: Math.max(0, a - steps / speed) };
+  }
+
+  globalThis.ViewMath = { MIN_ZOOM, MAX_ZOOM, screenToCell, cellToScreen, zoomAt, fitCamera, lineCells, stepsForFrame };
+})();
 </script>
 </body>
 </html>
