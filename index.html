@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Игра «Жизнь» Конвея</title>
+</head>
+<body>
+<script id="life-engine">
+(() => {
+  'use strict';
+
+  // "B3/S23" -> { birth, survive }: 9-битные маски, бит n = «n соседей».
+  function parseRule(str) {
+    const m = /^B([0-8]*)\/S([0-8]*)$/i.exec(String(str).trim());
+    if (!m) throw new Error(`Неверное правило: «${str}». Формат: B3/S23`);
+    const mask = (digits) => [...digits].reduce((acc, d) => acc | (1 << +d), 0);
+    return { birth: mask(m[1]), survive: mask(m[2]) };
+  }
+
+  globalThis.LifeEngine = { parseRule };
+})();
+</script>
+<script id="view-math">
+</script>
+</body>
+</html>
